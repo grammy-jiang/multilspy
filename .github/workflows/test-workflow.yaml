@@ -145,6 +145,7 @@ jobs:
         tests/multilspy/test_pyright_adapter_notifications.py
         tests/multilspy/test_pyright_process_lifecycle.py
         tests/multilspy/test_lsp_result_shapes.py
+        tests/multilspy/test_path_utils_portability.py
         tests/multilspy/test_completion_responses.py
         tests/multilspy/test_utf16_buffer_positions.py
         tests/multilspy/test_python_completions.py
