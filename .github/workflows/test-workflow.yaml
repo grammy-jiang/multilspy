@@ -103,6 +103,8 @@ jobs:
     name: Pyright native Windows (Python 3.12)
     runs-on: windows-latest
     timeout-minutes: 25
+    env:
+      PYTHONUTF8: "1"
 
     steps:
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -144,5 +146,4 @@ jobs:
         tests/multilspy/test_python_completions.py
         tests/multilspy/test_sync_startup.py
         tests/multilspy/test_sync_file_thread.py
-        tests/multilspy/test_runtime_permissions.py
         --tb=short

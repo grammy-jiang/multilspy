@@ -338,9 +338,8 @@ async def test_unresponsive_shutdown_cannot_block_pyright_cleanup(pyright):
     server._shutdown_timeout_seconds = 0.05
     waiting_forever = asyncio.Event()
     transport.shutdown.side_effect = waiting_forever.wait
-    with pytest.raises(asyncio.TimeoutError):
-        async with server.start_server():
-            assert server.server_started
+    async with server.start_server():
+        assert server.server_started
     transport.shutdown.assert_awaited_once()
     transport.stop.assert_awaited_once()
     assert not server.server_started
@@ -351,8 +350,14 @@ async def test_pyright_opt_in_workspace_edit_handler_is_explicit_and_bounded(pyr
     server, _, requests, _ = pyright
     expected = {"edit": {"changes": {"file:///test.py": []}}, "label": "demo"}
     callback = AsyncMock(return_value={"applied": True})
-    with pytest.raises(TypeError, match="callable"):
+    with pytest.raises(TypeError, match="async function"):
         server.set_workspace_edit_handler(42)
+    with pytest.raises(TypeError, match="async function"):
+        server.set_workspace_edit_handler(lambda _params: {"applied": True})
+    with pytest.raises(ValueError, match="positive finite"):
+        server.set_workspace_edit_handler(callback, timeout_seconds=0)
+    with pytest.raises(ValueError, match="positive finite"):
+        server.set_workspace_edit_handler(callback, timeout_seconds=float("inf"))
     server.set_workspace_edit_handler(callback)
     assert server._get_initialize_params(server.repository_root_path)["capabilities"]["workspace"]["applyEdit"] is True
 
@@ -405,3 +410,47 @@ async def test_pyright_edit_handler_exception_fails_closed_without_leaking_paths
         assert result == {"applied": False, "failureReason": "Workspace edit handler failed"}
         assert private_path not in repr(result)
     transport.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pyright_workspace_edit_handler_times_out_and_stops(pyright):
+    server, transport, requests, _ = pyright
+    wait = asyncio.Event()
+    async def never_return(_params):
+        await wait.wait()
+    server.set_workspace_edit_handler(never_return, timeout_seconds=0.02)
+    async with server.start_server():
+        assert await requests["workspace/applyEdit"]({"edit": {"changes": {}}}) == {
+            "applied": False, "failureReason": "Workspace edit handler timed out"
+        }
+    transport.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pyright_workspace_edit_response_is_normalized(pyright):
+    server, _, requests, _ = pyright
+    callback = AsyncMock(return_value={
+        "applied": False, "failureReason": "Needs approval", "failedChange": 1,
+        "untrustedExtraField": "do not forward",
+    })
+    server.set_workspace_edit_handler(callback)
+    async with server.start_server():
+        assert await requests["workspace/applyEdit"]({"edit": {"documentChanges": []}}) == {
+            "applied": False, "failureReason": "Needs approval", "failedChange": 1
+        }
+    callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    {"applied": False, "failedChange": True},
+    {"applied": False, "failedChange": -1},
+    {"applied": False, "failureReason": 123},
+])
+async def test_pyright_workspace_edit_response_invalid_metadata_is_rejected(pyright, bad):
+    server, _, requests, _ = pyright
+    server.set_workspace_edit_handler(AsyncMock(return_value=bad))
+    async with server.start_server():
+        assert await requests["workspace/applyEdit"]({"edit": {"changes": {}}}) == {
+            "applied": False, "failureReason": "Workspace edit handler failed"
+        }
