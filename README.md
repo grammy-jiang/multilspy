@@ -110,11 +110,34 @@ Pyright, update and revalidate the expected responses rather than silently
 skipping mismatched versions. For third-party import resolution, configure the
 project through `pyrightconfig.json` or `[tool.pyright]` in `pyproject.toml`.
 
-The adapter rejects server-initiated workspace edits, but this is not an OS
-sandbox. The low-level `server.send` API permits raw executeCommand requests,
-including commands that may write files directly; clients should not expose
-those requests to untrusted callers. Enforce workspace and subprocess
-permissions outside multilspy when building an agent-facing integration.
+By default, Pyright's `workspace/applyEdit` requests are refused and organize
+imports is disabled. To support editor-controlled writes, the embedding client
+can register an **async** handler before starting the server:
+
+```python
+# `lsp` is a PyrightServer returned by LanguageServer.create(...).
+async def apply_workspace_edit(params):
+    # Validate affected URIs, ranges, file versions, and user permission;
+    # apply the WorkspaceEdit transaction in YOUR editor or workspace layer.
+    return {"applied": False, "failureReason": "Not approved"}
+
+lsp.set_workspace_edit_handler(apply_workspace_edit)
+```
+
+When a handler is installed, the adapter advertises workspace `applyEdit`
+support and enables Pyright organize-imports commands. The handler's LSP
+response reports whether **the client actually applied the edit**. A successful
+rename request by itself returns an edit *proposal*; multilspy does not apply
+that proposal. It is the caller's responsibility to preview, approve, and
+apply the WorkspaceEdit, including document versions and file operations.
+
+**Security boundary:** this opt-in callback is NOT a subprocess sandbox.
+In Pyright 1.1.413, `pyright.createtypestub` directly writes `.pyi` files on
+the language-server side without calling `workspace/applyEdit`. Other raw
+`server.send.execute_command` calls may have similar side effects. Never expose
+arbitrary commands to untrusted callers; use OS-level filesystem restrictions
+and isolated workspaces for untrusted projects. Binnacle's workspace policy
+remains separate from multilspy's generic editor integration.
 
 ## Usage
 Example usage:

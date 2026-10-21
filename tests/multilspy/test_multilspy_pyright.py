@@ -28,6 +28,7 @@ from multilspy.lsp_protocol_handler.server import Error
 from multilspy.multilspy_config import Language, MultilspyConfig
 from multilspy.multilspy_exceptions import MultilspyException
 from multilspy.multilspy_logger import MultilspyLogger
+from multilspy.multilspy_utils import TextUtils
 
 # The adapter, the capability matrix and every exact payload in this module
 # were captured against this Pyright release.
@@ -1055,3 +1056,61 @@ def test_pyright_version_resolves_platform_specific_cli_wrappers(
     assert _pyright_version(binary) == TESTED_PYRIGHT_VERSION
     assert calls[0][0] == [str(sibling), "--version"]
     assert calls[0][1]["timeout"] == 60
+
+
+@pytest.mark.asyncio
+async def test_real_pyright_opt_in_organize_imports_applies_via_authorized_client(
+    python_project, create_pyright
+):
+    """An explicitly installed callback can apply an actual Pyright WorkspaceEdit.
+
+    The library does not make file changes by itself. The callback simulates
+    the embedding editor's authorization, UTF-16 position handling and disk
+    persistence, restricted to a temporary fixture file.
+    """
+    server = create_pyright()
+    report = python_project / "report.py"
+    before = {path: path.read_bytes() for path in python_project.iterdir() if path.is_file()}
+    done = asyncio.Event()
+    received = []
+
+    async def apply_authorized_edit(params):
+        received.append(params)
+        assert params["edit"]["changes"].keys() == {report.as_uri()}
+        edits = params["edit"]["changes"][report.as_uri()]
+        content = report.read_text(encoding="utf-8")
+        translated = []
+        for edit in edits:
+            start = edit["range"]["start"]
+            end = edit["range"]["end"]
+            translated.append((
+                TextUtils.get_index_from_line_col(content, start["line"], start["character"]),
+                TextUtils.get_index_from_line_col(content, end["line"], end["character"]),
+                edit["newText"],
+            ))
+        for start, end, replacement in sorted(translated, reverse=True):
+            content = content[:start] + replacement + content[end:]
+        report.write_text(content, encoding="utf-8")
+        done.set()
+        return {"applied": True}
+
+    server.set_workspace_edit_handler(apply_authorized_edit)
+    async def exercise():
+        async with server.start_server():
+            with server.open_file("report.py"):
+                command = {"command": "pyright.organizeimports", "arguments": [report.as_uri()]}
+                result = await asyncio.wait_for(
+                    server.server.send.execute_command(command), timeout=8
+                )
+                assert result["changes"][report.as_uri()]
+                await asyncio.wait_for(done.wait(), timeout=8)
+
+    await asyncio.wait_for(exercise(), timeout=35)
+    assert len(received) == 1
+    assert report.read_text(encoding="utf-8").startswith(
+        "import os\nimport sys\n\nfrom shapes import Point, Square, total_area"
+    )
+    for path, contents in before.items():
+        if path != report:
+            assert path.read_bytes() == contents
+    assert server.server.process is None

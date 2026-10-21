@@ -344,3 +344,64 @@ async def test_unresponsive_shutdown_cannot_block_pyright_cleanup(pyright):
     transport.shutdown.assert_awaited_once()
     transport.stop.assert_awaited_once()
     assert not server.server_started
+
+
+@pytest.mark.asyncio
+async def test_pyright_opt_in_workspace_edit_handler_is_explicit_and_bounded(pyright):
+    server, _, requests, _ = pyright
+    expected = {"edit": {"changes": {"file:///test.py": []}}, "label": "demo"}
+    callback = AsyncMock(return_value={"applied": True})
+    with pytest.raises(TypeError, match="callable"):
+        server.set_workspace_edit_handler(42)
+    server.set_workspace_edit_handler(callback)
+    assert server._get_initialize_params(server.repository_root_path)["capabilities"]["workspace"]["applyEdit"] is True
+
+    async with server.start_server():
+        configuration = await requests["workspace/configuration"](
+            {"items": [{"section": "pyright"}]}
+        )
+        assert configuration[0]["disableOrganizeImports"] is False
+        assert await requests["workspace/applyEdit"](expected) == {"applied": True}
+        callback.assert_awaited_once_with(expected)
+        with pytest.raises(MultilspyException, match="while running"):
+            server.set_workspace_edit_handler(None)
+
+    # A caller can revert to safe/default behavior between sessions.
+    server.set_workspace_edit_handler(None)
+    assert server._get_initialize_params(server.repository_root_path)["capabilities"]["workspace"]["applyEdit"] is False
+    async with server.start_server():
+        configuration = await requests["workspace/configuration"](
+            {"items": [{"section": "pyright"}]}
+        )
+        assert configuration[0]["disableOrganizeImports"] is True
+        assert await requests["workspace/applyEdit"](expected) == {
+            "applied": False,
+            "failureReason": "multilspy Pyright client is read-only",
+        }
+    callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_response", [None, {}, {"applied": "yes"}, []])
+async def test_pyright_invalid_workspace_edit_response_fails_closed(pyright, bad_response):
+    server, _, requests, _ = pyright
+    callback = AsyncMock(return_value=bad_response)
+    server.set_workspace_edit_handler(callback)
+    async with server.start_server():
+        assert await requests["workspace/applyEdit"]({"edit": {"changes": {}}}) == {
+            "applied": False,
+            "failureReason": "Workspace edit handler failed",
+        }
+    callback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pyright_edit_handler_exception_fails_closed_without_leaking_paths(pyright):
+    server, transport, requests, _ = pyright
+    private_path = "/private/secret/fixture.py"
+    server.set_workspace_edit_handler(AsyncMock(side_effect=OSError(private_path)))
+    async with server.start_server():
+        result = await requests["workspace/applyEdit"]({"edit": {"changes": {}}})
+        assert result == {"applied": False, "failureReason": "Workspace edit handler failed"}
+        assert private_path not in repr(result)
+    transport.stop.assert_awaited_once()

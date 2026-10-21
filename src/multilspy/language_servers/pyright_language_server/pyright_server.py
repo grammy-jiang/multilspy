@@ -9,7 +9,7 @@ import logging
 import os
 import pathlib
 import shutil
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 from multilspy.language_server import LanguageServer
@@ -49,6 +49,26 @@ class PyrightServer(LanguageServer):
         # bounded queue so callers can read them without unbounded growth.
         self.diagnostics: asyncio.Queue = asyncio.Queue(maxsize=64)
         self.diagnostics_dropped = False
+        # Applying an LSP WorkspaceEdit belongs to the embedding client. A
+        # callback must be installed explicitly before starting the server.
+        self._workspace_edit_handler: Callable[[dict], Awaitable[dict]] | None = None
+
+    def set_workspace_edit_handler(
+        self, handler: Callable[[dict], Awaitable[dict]] | None
+    ) -> None:
+        """Opt in to processing server-requested workspace edits.
+
+        The callback receives the original ApplyWorkspaceEditParams and must
+        authorize and apply the proposed edit, returning an LSP response such
+        as ``{"applied": True}``. No filesystem changes are made by this
+        adapter. This does NOT restrict commands that write directly on the
+        Pyright server side; callers must sandbox untrusted server processes.
+        """
+        if self.server_started:
+            raise MultilspyException("Cannot change workspace edit handler while running")
+        if handler is not None and not callable(handler):
+            raise TypeError("Workspace edit handler must be callable or None")
+        self._workspace_edit_handler = handler
 
     def _get_initialize_params(self, repository_absolute_path: str) -> InitializeParams:
         """
@@ -72,6 +92,9 @@ class PyrightServer(LanguageServer):
         assert d["workspaceFolders"][0]["name"] == "$name"
         d["workspaceFolders"][0]["name"] = os.path.basename(repository_absolute_path)
 
+        # Advertise application support only when an embedding client has
+        # explicitly supplied a handler that authorizes and applies edits.
+        d["capabilities"]["workspace"]["applyEdit"] = self._workspace_edit_handler is not None
         return d
 
     async def next_diagnostics(self, timeout: float = 5.0) -> dict:
@@ -115,7 +138,7 @@ class PyrightServer(LanguageServer):
                 "python.analysis": {},
                 "pyright": {
                     "disableLanguageServices": False,
-                    "disableOrganizeImports": True,
+                    "disableOrganizeImports": self._workspace_edit_handler is None,
                 },
             }
             answers = []
@@ -125,8 +148,18 @@ class PyrightServer(LanguageServer):
             return answers
 
         async def workspace_apply_edit(params):
-            # multilspy never applies server-initiated edits.
-            return {"applied": False, "failureReason": "multilspy Pyright client is read-only"}
+            if self._workspace_edit_handler is None:
+                return {"applied": False, "failureReason": "multilspy Pyright client is read-only"}
+            try:
+                response = await self._workspace_edit_handler(params)
+                if not isinstance(response, dict) or not isinstance(response.get("applied"), bool):
+                    raise ValueError("Invalid LSP workspace edit result")
+                return response
+            except Exception:
+                # Never report applied=true when a client edit failed, or
+                # expose sensitive paths from a user-supplied exception.
+                self.logger.log("LSP: workspace edit application failed", logging.WARNING)
+                return {"applied": False, "failureReason": "Workspace edit handler failed"}
 
         async def publish_diagnostics(params):
             if not isinstance(params, dict) or not isinstance(params.get("uri"), str):
