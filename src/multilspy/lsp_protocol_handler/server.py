@@ -32,8 +32,9 @@ import asyncio
 import dataclasses
 import json
 import os
+import re
 import psutil
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .lsp_requests import LspNotification, LspRequest
 from .lsp_types import ErrorCodes
@@ -58,6 +59,10 @@ class ProcessLaunchInfo:
 
     # The working directory for the process
     cwd: str = os.getcwd()
+
+    # Explicit opt-in: None retains original parent environment semantics;
+    # () inherits no parent variables; ("PATH", ...) selects only those keys.
+    inherited_environment_keys: Optional[Tuple[str, ...]] = None
 
 
 class Error(Exception):
@@ -216,13 +221,40 @@ class LanguageServerHandler:
         self.loop = None
         self.start_independent_lsp_process = start_independent_lsp_process
 
+    def _process_environment(self) -> Dict[str, str]:
+        """Construct child env with an optional explicit parent-key allowlist.
+
+        Most adapters keep None, preserving the prior inheritance behavior.
+        A host opting into an allowlist is responsible for including minimal
+        runtime variables (such as PATH) needed by its chosen language server.
+        This is credential-hygiene only, NOT an OS sandbox.
+        """
+        keys = self.process_launch_info.inherited_environment_keys
+        if keys is None:
+            result = os.environ.copy()
+        else:
+            if (
+                not isinstance(keys, tuple)
+                or len(keys) > 64
+                or any(
+                    not isinstance(key, str)
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None
+                    for key in keys
+                )
+                or len(set(keys)) != len(keys)
+            ):
+                raise ValueError("invalid_parent_environment_allowlist")
+            result = {key: os.environ[key] for key in keys if key in os.environ}
+        # Adapter-specified env remains explicit and wins over inherited keys.
+        result.update(self.process_launch_info.env)
+        return result
+
     async def start(self) -> None:
         """
         Starts the language server process and creates a task to continuously read from its stdout to handle communications
         from the server to the client
         """
-        child_proc_env = os.environ.copy()
-        child_proc_env.update(self.process_launch_info.env)
+        child_proc_env = self._process_environment()
         self.process = await asyncio.create_subprocess_exec(
             *self.process_launch_info.cmd,
             stdout=asyncio.subprocess.PIPE,

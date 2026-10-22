@@ -185,6 +185,13 @@ class LanguageServer:
             def logging_fn(source, target, msg):
                 pass
 
+        # Generic opt-in credential hygiene: all LSP adapters share this
+        # ProcessLaunchInfo boundary; the default None is legacy inheritance.
+        if config.inherited_environment_keys is not None:
+            process_launch_info.inherited_environment_keys = (
+                config.inherited_environment_keys
+            )
+
         # cmd is obtained from the child classes, which provide the language specific command to start the language server
         # LanguageServerHandler provides the functionality to start the language server and communicate with it
         self.server: LanguageServerHandler = LanguageServerHandler(

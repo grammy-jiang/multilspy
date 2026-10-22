@@ -4,7 +4,7 @@ Configuration parameters for Multilspy.
 
 from enum import Enum
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Tuple
 
 class Language(str, Enum):
     """
@@ -49,6 +49,11 @@ class MultilspyConfig:
     # Append new options after existing fields to preserve positional callers.
     # Jedi remains the default; Pyright requires an explicit choice.
     python_server: Literal["jedi", "pyright"] = "jedi"
+
+    # None preserves legacy full parent process environment inheritance.
+    # An explicitly supplied tuple selects only these host env keys, and ()
+    # selects none. Does not sandbox filesystem, network or child execution.
+    inherited_environment_keys: Optional[Tuple[str, ...]] = None
 
     @classmethod
     def from_dict(cls, env: dict):
